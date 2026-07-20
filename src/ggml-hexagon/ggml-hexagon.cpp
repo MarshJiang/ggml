@@ -2171,6 +2171,13 @@ static bool ggml_hexagon_matmul_is_hmx_eligible(
         return false;
     }
 
+    // The current 2D HMX path corrupts the penultimate output tile when a
+    // repacked quantized matrix has a partially populated final tile. Keep
+    // these shapes on the repacked HVX path until partial-N HMX is fixed.
+    if (ggml_hexagon_is_repack_type((ggml_type) wtype) && src0->ne[1] % 32 != 0) {
+        return false;
+    }
+
     // HMX supports F16, F32, and repack quantized types.
     if (!ggml_hexagon_is_hmx_weight_type((ggml_type) wtype)) {
         return false;
