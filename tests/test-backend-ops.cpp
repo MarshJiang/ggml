@@ -8814,6 +8814,12 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
     test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q8_0, GGML_TYPE_F32, 2880, 32, 2880, {1, 1}, {1, 1}));
     test_cases.emplace_back(new test_mul_mat(GGML_TYPE_MXFP4, GGML_TYPE_F32, 2880, 32, 2880, {1, 1}, {1, 1}));
 
+    // OmniVoice Qwen3 layer-0 fused QKV: [K, M] x [K, N].
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q8_0, GGML_TYPE_F32, 4096, 115, 1024, {1, 1}, {1, 1}));
+
+    // OmniVoice audio head: M=8 codebooks * 1025 logits is not 32-aligned.
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q8_0, GGML_TYPE_F32, 8200, 115, 1024, {1, 1}, {1, 1}));
+
 
 #if 0
     {
