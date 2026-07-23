@@ -4527,4 +4527,8 @@ ggml_backend_reg_t ggml_backend_hexagon_reg(void) {
     return &reg;
 }
 
+int ggml_backend_hexagon_get_arch(void) {
+    return ggml_backend_hexagon_reg() != NULL ? opt_arch : 0;
+}
+
 GGML_BACKEND_DL_IMPL(ggml_backend_hexagon_reg)
