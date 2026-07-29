@@ -4304,7 +4304,8 @@ struct ggml_hexagon_registry {
     ggml_hexagon_registry(ggml_backend_reg_t reg);
     ~ggml_hexagon_registry();
 
-    ggml_backend_device devices[GGML_HEXAGON_MAX_SESSIONS];
+    ggml_backend_device devices[GGML_HEXAGON_MAX_SESSIONS] = {};
+    size_t              ndev = 0;
 };
 
 ggml_hexagon_registry::ggml_hexagon_registry(ggml_backend_reg_t reg) {
@@ -4313,14 +4314,16 @@ ggml_hexagon_registry::ggml_hexagon_registry(ggml_backend_reg_t reg) {
     GGML_LOG_INFO("ggml-hex: Hexagon Arch version v%d\n", opt_arch);
 
     // Create devices / sessions
-    for (size_t i = 0; i < opt_ndev; i++) {
-        devices[i].iface = ggml_backend_hexagon_device_i;
-        devices[i].reg   = reg;
+    for (size_t session = 0; session < opt_ndev; session++) {
+        ggml_backend_device & device = devices[ndev];
+        device.iface = ggml_backend_hexagon_device_i;
+        device.reg   = reg;
         try {
-            devices[i].context = new ggml_hexagon_session(i, &devices[i]);
+            device.context = new ggml_hexagon_session(session, &device);
+            ndev++;
         } catch (const std::exception & exc) {
-            GGML_LOG_ERROR("ggml-hex: failed to create device/session %zu\n", i);
-            devices[i].context = nullptr;
+            GGML_LOG_ERROR("ggml-hex: failed to create device/session %zu: %s\n", session, exc.what());
+            device = {};
         }
     }
 }
@@ -4329,7 +4332,7 @@ ggml_hexagon_registry::~ggml_hexagon_registry() {
     GGML_LOG_INFO("ggml-hex: releasing registry\n");
 
     // Release devices / sessions
-    for (size_t i = 0; i < opt_ndev; i++) {
+    for (size_t i = 0; i < ndev; i++) {
         auto sess = static_cast<ggml_hexagon_session *>(devices[i].context);
         delete sess;
     }
@@ -4341,14 +4344,14 @@ static const char * ggml_backend_hexagon_reg_get_name(ggml_backend_reg_t reg) {
 }
 
 static size_t ggml_backend_hexagon_reg_get_device_count(ggml_backend_reg_t reg) {
-    return opt_ndev;
-    GGML_UNUSED(reg);
+    auto hreg = static_cast<ggml_hexagon_registry *>(reg->context);
+    return hreg ? hreg->ndev : 0;
 }
 
 static ggml_backend_dev_t ggml_backend_hexagon_reg_get_device(ggml_backend_reg_t reg, size_t index) {
     auto hreg = static_cast<ggml_hexagon_registry *>(reg->context);
 
-    if (index >= opt_ndev || !hreg->devices[index].context) {
+    if (!hreg || index >= hreg->ndev) {
         return nullptr;
     }
 
@@ -4385,7 +4388,7 @@ template<typename T, int BASE=10> std::string vec_to_str(std::vector<T> v) {
     return str;
 }
 
-static void ggml_hexagon_init(ggml_backend_reg * reg) {
+static bool ggml_hexagon_init(ggml_backend_reg * reg) {
     // Basic sanity checks to make sure definitions match
     static_assert((unsigned int) HTP_TYPE_Q4_0 == (unsigned int) GGML_TYPE_Q4_0,
                   "please update hexagon_type to match ggml_type");
@@ -4423,22 +4426,23 @@ static void ggml_hexagon_init(ggml_backend_reg * reg) {
     if (!str_arch) {
         int err = htpdrv_get_arch(CDSP_DOMAIN_ID, &opt_arch);
         if (err != 0) {
-            GGML_LOG_ERROR("ggml-hex: failed to query HTP version (err %d) defaulting to v73\n", err);
-            opt_arch = 73;
-        } else {
-            if (opt_arch < 73) {
-                GGML_LOG_WARN("ggml-hex: Hexagon arch v%d is under supported range, capping at v73\n", opt_arch);
-                opt_arch = 73;
-            } else if (opt_arch > 81) {
-                GGML_LOG_WARN("ggml-hex: Hexagon arch v%d is over supported range, capping at v81\n", opt_arch);
-                opt_arch = 81;
-            }
+            GGML_LOG_ERROR("ggml-hex: failed to query HTP version (err %d); backend unavailable\n", err);
+            return false;
         }
     } else {
         if (str_arch[0] == 'v' || str_arch[0] == 'V') {
             str_arch++;
         }
         opt_arch = strtoul(str_arch, NULL, 0);
+    }
+
+    if (opt_arch < 73) {
+        GGML_LOG_WARN("ggml-hex: Hexagon arch v%d is below the supported minimum v73; backend unavailable\n", opt_arch);
+        return false;
+    }
+    if (opt_arch > 81) {
+        GGML_LOG_WARN("ggml-hex: Hexagon arch v%d is over supported range, capping at v81\n", opt_arch);
+        opt_arch = 81;
     }
 
     size_t MiB = 1024 * 1024;
@@ -4492,7 +4496,15 @@ static void ggml_hexagon_init(ggml_backend_reg * reg) {
                 vec_to_str<uint32_t, 16>(opt_pmu_evt).c_str());
     }
 
-    reg->context = new ggml_hexagon_registry(reg);
+    auto registry = new ggml_hexagon_registry(reg);
+    if (registry->ndev == 0) {
+        GGML_LOG_WARN("ggml-hex: no Hexagon sessions could be created; backend unavailable\n");
+        delete registry;
+        return false;
+    }
+
+    reg->context = registry;
+    return true;
 }
 
 static const struct ggml_backend_reg_i ggml_backend_hexagon_reg_i = {
@@ -4503,6 +4515,7 @@ static const struct ggml_backend_reg_i ggml_backend_hexagon_reg_i = {
 };
 
 ggml_backend_reg_t ggml_backend_hexagon_reg(void) {
+    static bool attempted   = false;
     static bool initialized = false;
 
     static ggml_backend_reg reg = { /* .api_version = */ GGML_BACKEND_API_VERSION,
@@ -4512,19 +4525,18 @@ ggml_backend_reg_t ggml_backend_hexagon_reg(void) {
     {
         static std::mutex           mutex;
         std::lock_guard<std::mutex> lock(mutex);
-        if (!initialized) {
+        if (!attempted) {
+            attempted = true;
             auto nErr = htpdrv_init();
             if (nErr != AEE_SUCCESS) {
                 return NULL;
             }
 
-            ggml_hexagon_init(&reg);
+            initialized = ggml_hexagon_init(&reg);
         }
-
-        initialized = true;
     }
 
-    return &reg;
+    return initialized ? &reg : NULL;
 }
 
 int ggml_backend_hexagon_get_arch(void) {
