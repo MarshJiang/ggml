@@ -97,6 +97,8 @@ enum htp_op_code {
     HTP_OP_PAD,
     HTP_OP_NORM,
     HTP_OP_CONCAT,
+    HTP_OP_UNARY_SIN,
+    HTP_OP_SNAKE,
 
     HTP_OP_INVALID
 };

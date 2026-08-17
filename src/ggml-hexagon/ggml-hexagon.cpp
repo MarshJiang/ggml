@@ -2290,6 +2290,13 @@ static bool ggml_hexagon_matmul_is_hmx_eligible(
     const int ne12  = src1->ne[2];
     const int wtype = src0->type;
 
+    // The current F16 HMX path silently returns near-zero output for several
+    // DAC matmul shapes and can terminate the DSP queue for others. Keep F16
+    // on the verified tiled/HVX path; quantized LM weights still use HMX.
+    if (wtype == GGML_TYPE_F16) {
+        return false;
+    }
+
     // HMX weight tile requires N to be 32-aligned.
     if (ne01_padded % 32 != 0) {
         return false;
@@ -3492,6 +3499,7 @@ static htp_op_code op_remap_to_htp(const ggml_tensor * t) {
         case GGML_OP_SOLVE_TRI:       return HTP_OP_SOLVE_TRI;
         case GGML_OP_TRI:             return HTP_OP_TRI;
         case GGML_OP_PAD:             return HTP_OP_PAD;
+        case GGML_OP_SIN:             return HTP_OP_UNARY_SIN;
 
         case GGML_OP_UNARY:
             switch (ggml_get_unary_op(t)) {
@@ -3587,6 +3595,42 @@ static bool is_qkv_mergeable(const ggml_tensor * n_q, const ggml_tensor * n_k, c
     return true;
 }
 
+static bool ggml_hexagon_can_fuse_snake(const ggml_cgraph * graph, int i) {
+    static constexpr ggml_op snake_ops[5] = {
+        GGML_OP_MUL, GGML_OP_SIN, GGML_OP_SQR, GGML_OP_MUL, GGML_OP_ADD,
+    };
+
+    if (i + 4 >= graph->n_nodes || !ggml_can_fuse(graph, i, snake_ops, 5)) {
+        return false;
+    }
+
+    const ggml_tensor * mul0 = graph->nodes[i + 0];
+    const ggml_tensor * sin  = graph->nodes[i + 1];
+    const ggml_tensor * sqr  = graph->nodes[i + 2];
+    const ggml_tensor * mul1 = graph->nodes[i + 3];
+    const ggml_tensor * add  = graph->nodes[i + 4];
+
+    const ggml_tensor * x = ggml_are_same_shape(mul0, mul0->src[0]) ? mul0->src[0] : mul0->src[1];
+    const ggml_tensor * a = x == mul0->src[0] ? mul0->src[1] : mul0->src[0];
+    const ggml_tensor * inv_b = mul1->src[0] == sqr ? mul1->src[1] : mul1->src[0];
+    const ggml_tensor * x_in_add = add->src[0] == mul1 ? add->src[1] : add->src[0];
+
+    if (!x || !a || !inv_b || x_in_add != x) {
+        return false;
+    }
+    if (x->type != GGML_TYPE_F32 || a->type != GGML_TYPE_F32 || inv_b->type != GGML_TYPE_F32 ||
+        mul0->type != GGML_TYPE_F32 || sin->type != GGML_TYPE_F32 || sqr->type != GGML_TYPE_F32 ||
+        mul1->type != GGML_TYPE_F32 || add->type != GGML_TYPE_F32) {
+        return false;
+    }
+    if (!ggml_are_same_shape(a, inv_b) || a->ne[0] != 1 || a->ne[1] != x->ne[1] ||
+        x->ne[2] != 1 || x->ne[3] != 1 || a->ne[2] != 1 || a->ne[3] != 1) {
+        return false;
+    }
+    return ggml_is_contiguous(x) && ggml_is_contiguous(a) && ggml_is_contiguous(inv_b) &&
+           ggml_is_contiguous(add);
+}
+
 static bool try_fuse_node(const ggml_hexagon_session * sess, const ggml_cgraph * graph, int & i, std::vector<htp_opnode> & nodes) {
     if (!opt_opfusion) {
         return false;
@@ -3594,6 +3638,16 @@ static bool try_fuse_node(const ggml_hexagon_session * sess, const ggml_cgraph *
 
     ggml_tensor * n = graph->nodes[i];
     ggml_tensor * next_node = (i + 1 < graph->n_nodes) ? graph->nodes[i + 1] : nullptr;
+
+    if (n->op == GGML_OP_MUL && ggml_hexagon_can_fuse_snake(graph, i)) {
+        htp_opnode node(n, {}, HTP_OP_SNAKE);
+        for (int j = 1; j < 5; ++j) {
+            node.add_fused(graph->nodes[i + j]);
+        }
+        nodes.push_back(std::move(node));
+        i += 4;
+        return true;
+    }
 
     if (n->op == GGML_OP_RMS_NORM && next_node) {
         if (next_node->op == GGML_OP_MUL && op_is_compute(next_node) && ggml_can_fuse(graph, i, { GGML_OP_RMS_NORM, GGML_OP_MUL })) {
@@ -4134,6 +4188,7 @@ static bool ggml_backend_hexagon_device_supports_op(ggml_backend_dev_t dev, cons
 
         case GGML_OP_SQR:
         case GGML_OP_SQRT:
+        case GGML_OP_SIN:
             supp = ggml_hexagon_supported_unary(sess, op);
             break;
 

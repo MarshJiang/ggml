@@ -202,6 +202,34 @@ static void sqr_f32(const float * restrict src,
     }
 }
 
+static inline void sin_tile_f32(uint8_t * restrict dst, const uint8_t * restrict src, uint32_t n) {
+    const HVX_Vector * restrict vsrc = (const HVX_Vector *) src;
+    HVX_Vector * restrict vdst       = (HVX_Vector *) dst;
+    const uint32_t nvec = n / VLEN_FP32;
+    const uint32_t tail = n % VLEN_FP32;
+
+    for (uint32_t i = 0; i < nvec; ++i) {
+        vdst[i] = hvx_vec_sin_f32(vsrc[i]);
+    }
+    if (tail) {
+        HVX_Vector v = hvx_vec_sin_f32(vsrc[nvec]);
+        hvx_vec_store_a(&vdst[nvec], tail * sizeof(float), v);
+    }
+}
+
+static void sin_f32(const float * restrict src,
+                    float * restrict dst,
+                    const uint32_t num_rows,
+                    const struct htp_unary_context * uctx) {
+    htp_unary_op_preamble;
+
+    for (uint32_t ir = 0; ir < num_rows; ++ir) {
+        const uint8_t * restrict src_local = (const uint8_t *) src + ir * src0_row_size_aligned;
+        uint8_t * restrict dst_local       = (uint8_t *) dst + ir * dst_row_size_aligned;
+        sin_tile_f32(dst_local, src_local, ne0);
+    }
+}
+
 static void sqrt_f32(const float * restrict src,
                      float * restrict dst,
                      const uint32_t num_rows,
@@ -543,6 +571,7 @@ DEFINE_UNARY_TASK(rms_norm,       false, false, rms_norm_f32(src0_vtcm, dst_vtcm
 DEFINE_UNARY_TASK(rms_norm_mul,   true,  false, rms_norm_mul_f32(src0_vtcm, uctx->broadcast_weight ? (const float *) src1_vtcm_data : src1_vtcm, dst_vtcm, block_size, uctx))
 DEFINE_UNARY_TASK(scale,          false, false, scale_f32(src0_vtcm, dst_vtcm, block_size, uctx))
 DEFINE_UNARY_TASK(sqr,            false, false, sqr_f32(src0_vtcm, dst_vtcm, block_size, uctx))
+DEFINE_UNARY_TASK(unary_sin,      false, false, sin_f32(src0_vtcm, dst_vtcm, block_size, uctx))
 DEFINE_UNARY_TASK(sqrt,           false, false, sqrt_f32(src0_vtcm, dst_vtcm, block_size, uctx))
 DEFINE_UNARY_TASK(unary_neg,      false, false, neg_f32(src0_vtcm, dst_vtcm, block_size, uctx))
 DEFINE_UNARY_TASK(unary_exp,      false, false, exp_f32(src0_vtcm, dst_vtcm, block_size, uctx))
@@ -766,6 +795,7 @@ static inline void tri_apply_tile_f32(const uint8_t * restrict src, uint8_t * re
 
 DEFINE_UNARY_TILED_TASK(scale,          false, tile_scale_f32(dst_vtcm, src_vtcm, tw, op_params))
 DEFINE_UNARY_TILED_TASK(sqr,            false, hvx_sqr_f32_aa(dst_vtcm, src_vtcm, tw))
+DEFINE_UNARY_TILED_TASK(unary_sin,      false, sin_tile_f32(dst_vtcm, src_vtcm, tw))
 DEFINE_UNARY_TILED_TASK(sqrt,           false, hvx_sqrt_f32_aa(dst_vtcm, src_vtcm, tw))
 DEFINE_UNARY_TILED_TASK(unary_neg,      false, hvx_scale_f32_aa(dst_vtcm, src_vtcm, tw, -1.0f))
 DEFINE_UNARY_TILED_TASK(unary_exp,      false, hvx_exp_f32(dst_vtcm, src_vtcm, tw, false))
@@ -794,6 +824,7 @@ static int execute_op_unary_f32(struct htp_ops_context * octx) {
         case HTP_OP_UNARY_SIGMOID:   op_type = "sigmoid-f32";      break;
         case HTP_OP_UNARY_SOFTPLUS:  op_type = "softplus-f32";     break;
         case HTP_OP_UNARY_TANH:      op_type = "tanh-f32";         break;
+        case HTP_OP_UNARY_SIN:       op_type = "sin-f32";          break;
         case HTP_OP_L2_NORM:         op_type = "l2norm-f32";       break;
         case HTP_OP_TRI:             op_type = "tri-f32";          break;
 
@@ -889,6 +920,7 @@ static int execute_op_unary_f32(struct htp_ops_context * octx) {
                 case HTP_OP_UNARY_SIGMOID:   task_func = unary_task_f32_tiled_unary_sigmoid;  break;
                 case HTP_OP_UNARY_SOFTPLUS:  task_func = unary_task_f32_tiled_unary_softplus; break;
                 case HTP_OP_UNARY_TANH:      task_func = unary_task_f32_tiled_unary_tanh;     break;
+                case HTP_OP_UNARY_SIN:       task_func = unary_task_f32_tiled_unary_sin;      break;
                 case HTP_OP_TRI:             task_func = unary_task_f32_tiled_tri;            break;
                 default:                     break;
             }
@@ -905,6 +937,7 @@ static int execute_op_unary_f32(struct htp_ops_context * octx) {
                 case HTP_OP_UNARY_SIGMOID:   task_func = unary_task_f32_unary_sigmoid;        break;
                 case HTP_OP_UNARY_SOFTPLUS:  task_func = unary_task_f32_unary_softplus;       break;
                 case HTP_OP_UNARY_TANH:      task_func = unary_task_f32_unary_tanh;           break;
+                case HTP_OP_UNARY_SIN:       task_func = unary_task_f32_unary_sin;            break;
                 case HTP_OP_L2_NORM:         task_func = unary_task_f32_l2_norm;              break;
                 case HTP_OP_TRI:             task_func = unary_task_f32_tri;                  break;
                 default:                     break;

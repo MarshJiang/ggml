@@ -42,6 +42,7 @@ add_library(${HTP_LIB} SHARED
     solve-tri-ops.c
     pad-ops.c
     argsort-ops.c
+    snake-ops.c
 )
 
 target_compile_definitions(${HTP_LIB} PRIVATE
